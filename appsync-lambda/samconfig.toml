@@ -3,7 +3,7 @@ version = 0.1
 [default.deploy]
 [default.deploy.parameters]
 stack_name = "appsync-app"
-s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1itbpbaza7j6c"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1q26kcfv0s3z8"
 s3_prefix = "appsync-app"
 region = "eu-west-2"
 confirm_changeset = true
