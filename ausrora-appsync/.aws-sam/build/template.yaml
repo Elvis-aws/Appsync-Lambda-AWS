@@ -1,0 +1,454 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: appsync aurora
+Parameters:
+  Prefix:
+    Type: String
+    Default: appsync
+  DBTableName:
+    Type: String
+    Default: Pets-Table
+  CodeS3Bucket:
+    Type: String
+    Default: appsync-app-appsync-bucket
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.1.0/24
+      VpcId:
+        Ref: VPC
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: ''
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.2.0/24
+      VpcId:
+        Ref: VPC
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs: ''
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName:
+        Fn::Sub: ${AWS::StackName}-DBSecurityGroup
+      GroupDescription: DBSecurityGroup.
+      VpcId:
+        Ref: VPC
+  LambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+      - python3.9
+      Content:
+        S3Bucket:
+          Ref: CodeS3Bucket
+        S3Key:
+          Fn::Sub: ${Prefix}/layer.zip
+      Description:
+        Fn::Sub: ${AWS::StackName}-This is lambda layer
+      LayerName:
+        Fn::Sub: ${AWS::StackName}-LambdaLayer
+  Function1:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-function1
+      Environment:
+        Variables:
+          API_KEY:
+            Fn::GetAtt:
+            - ApiKey
+            - ApiKey
+          GRAPHQL_URL: GraphQLApi.GraphQLUrl
+      Handler: src/app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - FunctionRole1
+        - Arn
+      Code:
+        S3Bucket:
+          Ref: CodeS3Bucket
+        S3Key:
+          Fn::Sub: ${Prefix}/deploy.zip
+      Timeout: 50
+      MemorySize: 128
+      Runtime: python3.9
+      Layers:
+      - Ref: LambdaLayer
+  Function2:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-function2
+      Handler: src/app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - FunctionRole2
+        - Arn
+      Timeout: 50
+      MemorySize: 128
+      Runtime: python3.9
+      Environment:
+        Variables:
+          DBCLUSTER_ARN:
+            Ref: DBCluster
+          DBNAME: auroradb
+          DBTABLE:
+            Ref: DBTableName
+          SECRET_ARN:
+            Ref: Secret
+          REGION:
+            Ref: AWS::Region
+      Code:
+        ZipFile: "import boto3\nimport cfnresponse\nimport json\nimport os\n\ndbcluster_arn\
+          \ = os.environ['DBCLUSTER_ARN']\ndbname = os.environ['DBNAME']\ndbtable\
+          \ = os.environ['DBTABLE']\nregion = os.environ['REGION']\nsecret_arn = os.environ['SECRET_ARN']\n\
+          \nsql1 = 'create table {table}(id varchar(200), type varchar(200), price\
+          \ float)'.format(table=dbtable)\nclient = boto3.client('rds-data', region_name=region)\n\
+          schema = 'mysql'\n\nCREATE = 'Create'\nresponse_data = {}\n\ndef lambda_handler(event,\
+          \ context):\n  try:\n    if event['RequestType'] == CREATE:\n      response1\
+          \ = client.execute_statement(\n        database=dbname,\n        resourceArn=dbcluster_arn,\n\
+          \        schema=schema,\n        secretArn=secret_arn,\n        sql=sql1\n\
+          \      )\n      print(response1)\n\n    cfnresponse.send(event, context,\
+          \ cfnresponse.SUCCESS, response_data)\n\n  except Exception as e:\n    print(e)\n\
+          \    cfnresponse.send(event, context, cfnresponse.FAILED, response_data)\n"
+  FunctionRole1:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  FunctionRole2:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-AuroraServerlessDataAPIPolicy
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            Resource:
+            - Ref: Secret
+          - Effect: Allow
+            Action:
+            - rds-data:BatchExecuteStatement
+            - rds-data:BeginTransaction
+            - rds-data:CommitTransaction
+            - rds-data:ExecuteStatement
+            - rds-data:RollbackTransaction
+            Resource:
+            - '*'
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn:
+        Fn::GetAtt:
+        - Function1
+        - Arn
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName:
+        Fn::GetAtt:
+        - Function1
+        - Arn
+      FunctionUrlAuthType: NONE
+      Principal: '*'
+  CustomResource:
+    Type: Custom::CustomResource
+    DependsOn: Function2
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+        - Function2
+        - Arn
+  Secret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-Secret
+      SecretString:
+        Fn::Sub: '{"username":"username","password":"password"}'
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      AuthenticationType: API_KEY
+      Name:
+        Fn::Sub: ${AWS::StackName}-GraphQLApi
+  DataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      Name: DataSource
+      RelationalDatabaseConfig:
+        RdsHttpEndpointConfig:
+          AwsRegion:
+            Ref: AWS::Region
+          AwsSecretStoreArn:
+            Ref: Secret
+          DatabaseName: auroradb
+          DbClusterIdentifier:
+            Ref: DBCluster
+        RelationalDatabaseSourceType: RDS_HTTP_ENDPOINT
+      ServiceRoleArn:
+        Fn::GetAtt:
+        - DataSourceRole
+        - Arn
+      Type: RELATIONAL_DATABASE
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      Definition: "type Mutation {\n  createPet(input: CreatePetInput!): Pet\n  updatePet(input:\
+        \ UpdatePetInput!): Pet\n  deletePet(input: DeletePetInput!): Pet\n}\n\ninput\
+        \ CreatePetInput {\n    type: PetType\n    price: Float!\n}\n\ninput UpdatePetInput\
+        \ {\nid: ID!\n    type: PetType\n    price: Float!\n}\n\ninput DeletePetInput\
+        \ {\n    id: ID!\n}\n\ntype Pet {\n    id: ID!\n    type: PetType\n    price:\
+        \ Float\n}\n\nenum PetType {\n    dog\n    cat\n    fish\n    bird\n    gecko\n\
+        }\n\ntype Query {\n    getPet(id: ID!): Pet\n    listPets: [Pet]\n    listPetsByPriceRange(min:\
+        \ Float, max: Float): [Pet]\n}\n\nschema {\n    query: Query\n    mutation:\
+        \ Mutation\n}\n"
+  CreatePetResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: createPet
+      Kind: UNIT
+      RequestMappingTemplate: "#set($id=$utils.autoId())\n{\n    \"version\": \"2018-05-29\"\
+        ,\n    \"statements\": [\n        \"insert into Pets VALUES ('$id', '$ctx.args.input.type',\
+        \ $ctx.args.input.price)\",\n        \"select * from Pets WHERE id = '$id'\"\
+        \n    ]\n}\n"
+      ResponseMappingTemplate: '$utils.toJson($utils.rds.toJsonObject($ctx.result)[1][0])
+
+        '
+      TypeName: Mutation
+  UpdatePetResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: updatePet
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"statements\"\
+        : [\n      $util.toJson(\"update Pets set type='$ctx.args.input.type', price=$ctx.args.input.price\
+        \ WHERE id='$ctx.args.input.id'\"),\n      $util.toJson(\"select * from Pets\
+        \ WHERE id = '$ctx.args.input.id'\")\n  ]\n}\n"
+      ResponseMappingTemplate: '$utils.toJson($utils.rds.toJsonObject($ctx.result)[1][0])
+
+        '
+      TypeName: Mutation
+  DeletePetResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: deletePet
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"statements\"\
+        : [\n      $util.toJson(\"select * from Pets WHERE id='$ctx.args.input.id'\"\
+        ),\n      $util.toJson(\"delete from Pets WHERE id='$ctx.args.input.id'\"\
+        )\n  ]\n}\n"
+      ResponseMappingTemplate: '$utils.toJson($utils.rds.toJsonObject($ctx.result)[0][0])
+
+        '
+      TypeName: Mutation
+  GetPetResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: getPet
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n      \"statements\"\
+        : [\n          $util.toJson(\"select * from Pets WHERE id='$ctx.args.id'\"\
+        )\n  ]\n}\n"
+      ResponseMappingTemplate: '$utils.toJson($utils.rds.toJsonObject($ctx.result)[0][0])
+
+        '
+      TypeName: Query
+  ListPetsResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: listPets
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"statements\"\
+        : [\n      \"select * from Pets\"\n  ]\n}\n"
+      ResponseMappingTemplate: '$utils.toJson($utils.rds.toJsonObject($ctx.result)[0])
+
+        '
+      TypeName: Query
+  ListPetsByPriceRangeResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: listPetsByPriceRange
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"statements\"\
+        : [\n          \"select * from Pets where price > :MIN and price < :MAX\"\n\
+        \  ],\n\n  \"variableMap\": {\n      \":MAX\": $util.toJson($ctx.args.max),\n\
+        \      \":MIN\": $util.toJson($ctx.args.min)\n  }\n}\n"
+      ResponseMappingTemplate: '$utils.toJson($utils.rds.toJsonObject($ctx.result)[0])
+
+        '
+      TypeName: Query
+  ApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+  DataSourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service: appsync.amazonaws.com
+      Policies:
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-DataSourcePolicy
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - rds-data:DeleteItems
+            - rds-data:ExecuteSql
+            - rds-data:ExecuteStatement
+            - rds-data:GetItems
+            - rds-data:InsertItems
+            - rds-data:UpdateItems
+            Resource:
+            - '*'
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            Resource:
+            - '*'
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: dbsubnetgroup
+      DBSubnetGroupDescription: test subnet group
+      SubnetIds:
+      - Ref: PrivateSubnet1
+      - Ref: PrivateSubnet2
+  DBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DatabaseName: auroradb
+      DBClusterIdentifier:
+        Fn::Sub: ${Prefix}-dbcluster
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      EnableHttpEndpoint: true
+      Engine: aurora-mysql
+      EngineMode: serverless
+      EngineVersion: 5.7.mysql_aurora.2.07.1
+      MasterUsername: username
+      MasterUserPassword: password
+      StorageEncrypted: true
+      VpcSecurityGroupIds:
+      - Ref: DBSecurityGroup
+Outputs:
+  ApiKey:
+    Value:
+      Fn::GetAtt:
+      - ApiKey
+      - ApiKey
