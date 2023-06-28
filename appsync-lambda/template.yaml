@@ -1,0 +1,425 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Appsync lambda
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: python3.9
+Parameters:
+  S3LayerBucket:
+    Type: String
+    Default: appsync-lambda-s3-bucket
+
+Resources:
+##############################################
+################# Graph-QL API ###############
+##############################################
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      AuthenticationType: API_KEY
+      Name: !Sub ${AWS::StackName}-graphqlapi
+##############################################
+################ Appsync Apikey ##############
+##############################################
+  ApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+##############################################
+################ Data-Source #################
+##############################################
+  DataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      LambdaConfig:
+        LambdaFunctionArn: !GetAtt DataSourceLambda.Arn
+      Name: DataSource
+      ServiceRoleArn: !GetAtt DataSourceRole.Arn
+      Type: AWS_LAMBDA  # Here lambda is used as the data source
+##############################################
+############## Graph-QL Schema ###############
+##############################################
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Definition: |
+        schema {
+          query: Query
+          mutation: Mutation
+        }
+
+        type Query {
+          listS3Objects: [S3Object]
+        }
+
+        type Mutation {
+          putS3Object: S3Object
+          deleteS3Object(Key: String!): S3Object
+        }
+
+        type S3Object {
+          Key: String!
+          LastModified: String
+          Size: Int
+          ETag: String
+        }
+##############################################
+############ Put S3 Object Resolver ##########
+##############################################
+  PutS3ObjectResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+      - GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: putS3Object
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2018-05-29",
+          "operation": "Invoke",
+          "payload": {
+            "field": "Put"
+          }
+        }
+      ResponseMappingTemplate: |
+        $context.result
+      TypeName: Mutation
+##############################################
+######### Delete S3 Object Resolver ##########
+##############################################
+  DeleteS3ObjectResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+      - GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: deleteS3Object
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2018-05-29",
+          "operation": "Invoke",
+          "payload": {
+            "field": "Delete",
+            "arguments": $utils.toJson($context.arguments)
+          }
+        }
+      ResponseMappingTemplate: |
+        $context.result
+      TypeName: Mutation
+##############################################
+########### List S3 Object Resolver ##########
+##############################################
+  ListS3ObjectsResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+      - GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt DataSource.Name
+      FieldName: listS3Objects
+      Kind: UNIT
+      RequestMappingTemplate: |
+        {
+          "version": "2018-05-29",
+          "operation": "Invoke",
+          "payload": {
+            "field": "List"
+          }
+        }
+      ResponseMappingTemplate: |
+        $context.result
+      TypeName: Query
+##############################################
+########## appsync Lambda Role ###########
+##############################################
+  DataSourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: appsync.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-dataSourcePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt DataSourceLambda.Arn
+# Permission is granted for AppSync to execute a Lambda function that is set as a data source.
+##############################################
+############## Data Source Lambda ############
+##############################################
+  DataSourceLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-datasourcelambda
+      Role: !GetAtt DataSourceLambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref S3Bucket
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from datetime import date, datetime
+          
+          bucket_name = os.environ['BUCKET_NAME']
+          s3_client = boto3.client('s3')
+          
+          PUT = 'Put'
+          LIST = 'List'
+          DELETE = 'Delete'
+          
+          
+          def json_serial(obj):
+              # reference: https://www.yoheim.net/blog.php?q=20170703
+              if isinstance(obj, (datetime, date)):
+                  return obj.isoformat()
+              raise TypeError("Type %s not serializable" % type(obj))
+          
+          
+          def lambda_handler(event, context):
+              if event['field'] == PUT:
+                  now = datetime.now()
+                  now_str = now.strftime('%Y%m%d%H%M%S')
+          
+                  key = "{datetime}.txt".format(datetime=now_str)
+          
+                  put_response = s3_client.put_object(
+                      Bucket=bucket_name,
+                      Key=key,
+                      Body=now_str.encode())
+          
+                  get_response = s3_client.get_object(
+                      Bucket=bucket_name, Key=key)
+          
+                  object_ = {
+                      'Key': key,
+                      'LastModified': get_response['LastModified'],
+                      'Size': get_response['ContentLength'],
+                      'ETag': get_response['ETag']
+                  }
+                  return json.dumps(object_, default=json_serial)
+          
+              elif event['field'] == LIST:
+                  list_response = s3_client.list_objects_v2(
+                      Bucket=bucket_name)
+                  objects = list_response['Contents']
+                  return json.dumps(objects, default=json_serial)
+          
+              elif event['field'] == DELETE:
+                  key = event['arguments']['Key']
+                  delete_response = s3_client.delete_object(
+                      Bucket=bucket_name, Key=key)
+                  object_ = {
+                      'Key': key
+                  }
+                  return json.dumps(object_, default=json_serial)
+##############################################
+########### DataSource Lambda Role ###########
+##############################################
+  DataSourceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !GetAtt S3Bucket.Arn
+                  - !Sub "${S3Bucket.Arn}/*"
+##############################################
+########### GraphQL Execute Lambda ############
+##############################################
+  GraphQLExecuteLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-graphqlexecutelambda
+      Layers:
+        - !Ref LambdaLayer
+      Role: !GetAtt GraphQLExecuteLambdaRole.Arn
+      Environment:
+        Variables:
+          API_KEY: !Ref ApiKey
+          GRAPHQL_URL: GraphQLApi.GraphQLUrl
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import time
+          from gql import Client, gql
+          from gql.transport.aiohttp import AIOHTTPTransport
+          
+          api_key = os.environ['API_KEY']
+          graphql_url = os.environ['GRAPHQL_URL']
+          
+          transport = AIOHTTPTransport(
+              url=graphql_url,
+              headers={
+                  'x-api-key': api_key
+              })
+          client = Client(transport=transport, fetch_schema_from_transport=True)
+          
+          PUT = 'Put'
+          LIST = 'List'
+          DELETE = 'Delete'
+          
+          
+          def lambda_handler(event, context):
+              field = ''
+              document = None
+              result = None
+          
+              if not 'queryStringParameters' in event or (
+                      not 'field' in event['queryStringParameters']):
+                  field = LIST
+              else:
+                  field = event['queryStringParameters']['field']
+          
+              if field == PUT:
+                  document = gql(
+                      """
+                      mutation PutS3ObjectMutation {
+                        putS3Object {
+                          Key
+                          LastModified
+                          Size
+                          ETag
+                        }
+                      }
+                      """
+                  )
+                  result = client.execute(document)
+          
+              elif field == LIST:
+                  document = gql(
+                      """
+                      query ListS3ObjectsQuery {
+                        listS3Objects {
+                          Key
+                        }
+                      }
+                      """
+                  )
+                  result = client.execute(document)
+          
+              elif field == DELETE:
+                  object_name = event['queryStringParameters']['object_name']
+                  document = gql(
+                      """
+                      mutation DeleteS3ObjectsMutation($object_name: String!) {
+                        deleteS3Object(Key: $object_name) {
+                          Key
+                        }
+                      }
+                      """
+                  )
+          
+                  params = {
+                      'object_name': object_name
+                  }
+                  result = client.execute(document, variable_values=params)
+          
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(result, indent=2)
+              }
+##############################################
+######### GraphQL Execute Lambda Role ########
+##############################################
+  GraphQLExecuteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+##############################################
+######### GraphQL Execute Lambda URL #########
+##############################################
+  GraphQLExecuteLambdaUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt GraphQLExecuteLambda.Arn
+##############################################
+###### GraphQ LExecute Lambda Permission #####
+##############################################
+  GraphQLExecuteLambdaUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !GetAtt GraphQLExecuteLambda.Arn
+      FunctionUrlAuthType: NONE
+      Principal: "*"
+##############################################
+################ Lambda Layer ################
+##############################################
+  LambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.9
+      Content:
+        S3Bucket: !Ref S3LayerBucket
+        S3Key: lambdalayer.zip
+      Description: Lambda layer
+      LayerName: !Sub ${AWS::StackName}-layer
+# Create folder
+  # mkdir layer
+# use pip3 instll to install all dependencies
+  # pip3 install boto3
+  # sudo pip3 install --pre "gql[all]" -t python
+  # pip3 install datetime
+# zip file
+  # zip lambdalayer.zip -r python
+##############################################
+################## S3 Bucket #################
+##############################################
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-s3bucket
+      AccessControl: Private
+################## Out-Put ###################
+##############################################
+Outputs:
+  runtimeLambdaUrl:
+    Value: !GetAtt GraphQLExecuteLambdaUrl.FunctionUrl
