@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Appsync lambda
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: python3.9
+    Tracing: Active
+    CodeUri: src/
+Resources:
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      AuthenticationType: API_KEY
+      Name:
+        Fn::Sub: ${AWS::StackName}-graphqlapi
+  ApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      Description: My API Key
+      Expires: 1699995307
+  DataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      LambdaConfig:
+        LambdaFunctionArn:
+          Fn::GetAtt:
+          - DataSourceLambda
+          - Arn
+      Name: DataSource
+      ServiceRoleArn:
+        Fn::GetAtt:
+        - DataSourceRole
+        - Arn
+      Type: AWS_LAMBDA
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      Definition: "schema {\n  query: Query\n  mutation: Mutation\n}\n\ntype Query\
+        \ {\n  listS3Objects: [S3Object]\n}\n\ntype Mutation {\n  putS3Object: S3Object\n\
+        \  deleteS3Object(Key: String!): S3Object\n}\n\ntype S3Object {\n  Key: String!\n\
+        \  LastModified: String\n  Size: Int\n  ETag: String\n}\n"
+  PutS3ObjectResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: putS3Object
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"operation\"\
+        : \"Invoke\",\n  \"payload\": {\n    \"field\": \"Put\"\n  }\n}\n"
+      ResponseMappingTemplate: '$context.result
+
+        '
+      TypeName: Mutation
+  DeleteS3ObjectResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: deleteS3Object
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"operation\"\
+        : \"Invoke\",\n  \"payload\": {\n    \"field\": \"Delete\",\n    \"arguments\"\
+        : $utils.toJson($context.arguments)\n  }\n}\n"
+      ResponseMappingTemplate: '$context.result
+
+        '
+      TypeName: Mutation
+  ListS3ObjectsResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn:
+    - GraphQLSchema
+    Properties:
+      ApiId:
+        Fn::GetAtt:
+        - GraphQLApi
+        - ApiId
+      DataSourceName:
+        Fn::GetAtt:
+        - DataSource
+        - Name
+      FieldName: listS3Objects
+      Kind: UNIT
+      RequestMappingTemplate: "{\n  \"version\": \"2018-05-29\",\n  \"operation\"\
+        : \"Invoke\",\n  \"payload\": {\n    \"field\": \"List\"\n  }\n}\n"
+      ResponseMappingTemplate: '$context.result
+
+        '
+      TypeName: Query
+  DataSourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service: appsync.amazonaws.com
+      Policies:
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-dataSourcePolicy
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+            - Fn::GetAtt:
+              - DataSourceLambda
+              - Arn
+  DataSourceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-datasourcelambda
+      Role:
+        Fn::GetAtt:
+        - DataSourceLambdaRole
+        - Arn
+      Handler: datasource.source_handler
+      Environment:
+        Variables:
+          BUCKET_NAME:
+            Ref: S3Bucket
+      CodeUri: DataSourceLambda
+    Metadata:
+      SamResourceId: DataSourceLambda
+  DataSourceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-S3Access
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:*
+            Resource:
+            - Fn::GetAtt:
+              - S3Bucket
+              - Arn
+            - Fn::Sub: ${S3Bucket.Arn}/*
+  GraphQLClientLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-graphqlclientlambda
+      Role:
+        Fn::GetAtt:
+        - GraphQLClientLambdaRole
+        - Arn
+      Handler: clientexecute.execute_handler
+      Environment:
+        Variables:
+          API_KEY:
+            Ref: ApiKey
+          GRAPHQL_URL:
+            Fn::GetAtt:
+            - GraphQLApi
+            - GraphQLUrl
+      CodeUri: GraphQLClientLambda
+    Metadata:
+      SamResourceId: GraphQLClientLambda
+  GraphQLClientLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+      - PolicyName:
+          Fn::Sub: ${AWS::StackName}-cloudwatch-access
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action: '*'
+            Resource: '*'
+  GraphQLExecuteLambdaUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn:
+        Fn::GetAtt:
+        - GraphQLClientLambda
+        - Arn
+  GraphQLExecuteLambdaUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName:
+        Fn::GetAtt:
+        - GraphQLClientLambda
+        - Arn
+      FunctionUrlAuthType: NONE
+      Principal: '*'
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: ${AWS::StackName}-s3bucket
+      AccessControl: Private
+Outputs:
+  RuntimeLambdaUrl:
+    Value:
+      Fn::GetAtt:
+      - GraphQLExecuteLambdaUrl
+      - FunctionUrl
