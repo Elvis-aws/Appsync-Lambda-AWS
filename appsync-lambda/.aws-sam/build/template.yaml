@@ -15,7 +15,7 @@ Resources:
       AuthenticationType: API_KEY
       Name:
         Fn::Sub: ${AWS::StackName}-graphqlapi
-  ApiKey:
+  AppsyncApiKey:
     Type: AWS::AppSync::ApiKey
     Properties:
       ApiId:
@@ -197,7 +197,9 @@ Resources:
       Environment:
         Variables:
           API_KEY:
-            Ref: ApiKey
+            Fn::GetAtt:
+            - AppsyncApiKey
+            - ApiKey
           GRAPHQL_URL:
             Fn::GetAtt:
             - GraphQLApi

@@ -22,7 +22,7 @@ Resources:
 ##############################################
 ################ Appsync Apikey ##############
 ##############################################
-  ApiKey:
+  AppsyncApiKey:
     Type: AWS::AppSync::ApiKey
     Properties:
       ApiId: !GetAtt GraphQLApi.ApiId
@@ -214,7 +214,7 @@ Resources:
       Handler: clientexecute.execute_handler
       Environment:
         Variables:
-          API_KEY: !Ref ApiKey
+          API_KEY: !GetAtt AppsyncApiKey.ApiKey
           GRAPHQL_URL: !GetAtt GraphQLApi.GraphQLUrl
 ##############################################
 ######### GraphQL Execute Lambda Role ########
